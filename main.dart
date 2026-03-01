@@ -1,11 +1,13 @@
+import 'dart:async';
+import 'dart:math';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:on_audio_query/on_audio_query.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter_audio_waveforms/flutter_audio_waveforms.dart';
 
 void main() {
   runApp(const MyApp());
@@ -43,8 +45,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
   final AudioPlayer _player = AudioPlayer();
   final OnAudioQuery _audioQuery = OnAudioQuery();
 
-  late final PlayerController _waveController;
-
   List<SongModel> _songs = [];
   int _currentIndex = 0;
   bool _isPlaying = false;
@@ -52,14 +52,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
-    _waveController = PlayerController();
     _init();
   }
 
   @override
   void dispose() {
     _player.dispose();
-    _waveController.dispose();
     super.dispose();
   }
 
@@ -71,10 +69,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
       await _loadFromFolder(savedFolder);
     } else {
       await _loadSongs();
-    }
-
-    if (_songs.isNotEmpty) {
-      await _prepareWaveform();
     }
   }
 
@@ -98,14 +92,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  Future<void> _prepareWaveform() async {
-    if (_songs.isEmpty) return;
-    await _waveController.preparePlayer(
-      path: _songs[_currentIndex].uri!,
-      shouldExtractWaveform: true,
-    );
-  }
-
   Future<void> _pickFolder() async {
     String? folder = await FilePicker.platform.getDirectoryPath();
     if (folder == null) return;
@@ -116,7 +102,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (_songs.isNotEmpty) {
       await _player.play();
       setState(() => _isPlaying = true);
-      await _prepareWaveform();
     }
   }
 
@@ -125,7 +110,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (!dir.existsSync()) return;
 
     final files = dir.listSync(recursive: true).where((f) =>
-    f.path.endsWith('.mp3') ||
+        f.path.endsWith('.mp3') ||
         f.path.endsWith('.wav') ||
         f.path.endsWith('.flac') ||
         f.path.endsWith('.aac') ||
@@ -174,7 +159,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _player.setAudioSource(AudioSource.uri(Uri.parse(_songs[_currentIndex].uri!)));
     await _player.play();
     setState(() => _isPlaying = true);
-    await _prepareWaveform();
   }
 
   Future<void> _prev() async {
@@ -183,7 +167,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     await _player.setAudioSource(AudioSource.uri(Uri.parse(_songs[_currentIndex].uri!)));
     await _player.play();
     setState(() => _isPlaying = true);
-    await _prepareWaveform();
   }
 
   @override
@@ -214,9 +197,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   color: Colors.white70,
                 ),
               ),
+
               const Spacer(),
 
-              // PICK FOLDER BUTTON
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.black,
@@ -240,7 +223,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
               const SizedBox(height: 30),
 
-              // CONTROLS
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
@@ -252,21 +234,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
               const SizedBox(height: 30),
 
-              // WAVEFORM / SPECTRUM
-              SizedBox(
-                height: 120,
-                child: AudioFileWaveforms(
-                  size: Size(double.infinity, 120),
-                  playerController: _waveController,
-                  waveformType: WaveformType.bar,
-                  waveformColor: Colors.blueAccent,
-                  enableSeekGesture: false,
-                ),
-              ),
+              // CAR HUD SPECTRUM
+              CarSpectrumVisualizer(isPlaying: _isPlaying),
 
               const SizedBox(height: 30),
 
-              // PROGRESS BAR
               Container(
                 height: 6,
                 width: double.infinity,
@@ -295,25 +267,102 @@ class _PlayerScreenState extends State<PlayerScreen> {
             end: Alignment.bottomRight,
           ),
           borderRadius: BorderRadius.circular(6),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black54,
-              offset: const Offset(3, 3),
-              blurRadius: 3,
-            ),
-            BoxShadow(
-              color: Colors.white24,
-              offset: const Offset(-2, -2),
-              blurRadius: 2,
-            ),
+          boxShadow: const [
+            BoxShadow(color: Colors.black54, offset: Offset(3, 3), blurRadius: 3),
+            BoxShadow(color: Colors.white24, offset: Offset(-2, -2), blurRadius: 2),
           ],
         ),
-        child: Icon(
-          icon,
-          color: Colors.white,
-          size: big ? 50 : 36,
-        ),
+        child: Icon(icon, color: Colors.white, size: big ? 50 : 36),
       ),
     );
   }
+}
+
+/* ===========================
+   CAR HUD SPECTRUM VISUALIZER
+=========================== */
+
+class CarSpectrumVisualizer extends StatefulWidget {
+  final bool isPlaying;
+  const CarSpectrumVisualizer({super.key, required this.isPlaying});
+
+  @override
+  State<CarSpectrumVisualizer> createState() => _CarSpectrumVisualizerState();
+}
+
+class _CarSpectrumVisualizerState extends State<CarSpectrumVisualizer> {
+  static const int barCount = 28;
+  final Random _random = Random();
+  late Timer _timer;
+
+  List<double> levels = List.generate(barCount, (_) => 0.1);
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 90), (_) {
+      setState(() {
+        for (int i = 0; i < levels.length; i++) {
+          if (widget.isPlaying) {
+            levels[i] = 0.2 + _random.nextDouble() * 0.8;
+          } else {
+            levels[i] = max(0.05, levels[i] * 0.7);
+          }
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 120,
+      width: double.infinity,
+      child: CustomPaint(
+        painter: _SpectrumPainter(levels),
+      ),
+    );
+  }
+}
+
+class _SpectrumPainter extends CustomPainter {
+  final List<double> levels;
+  _SpectrumPainter(this.levels);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..shader = const LinearGradient(
+        colors: [
+          Color(0xFF00B0FF),
+          Color(0xFF0077FF),
+          Color(0xFF003C8F),
+        ],
+        begin: Alignment.bottomCenter,
+        end: Alignment.topCenter,
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
+
+    final double barWidth = size.width / (levels.length * 1.5);
+
+    for (int i = 0; i < levels.length; i++) {
+      final double x = i * barWidth * 1.5;
+      final double barHeight = levels[i] * size.height;
+
+      final rect = RRect.fromRectAndRadius(
+        Rect.fromLTWH(x, size.height - barHeight, barWidth, barHeight),
+        const Radius.circular(3),
+      );
+
+      canvas.drawRRect(rect, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
